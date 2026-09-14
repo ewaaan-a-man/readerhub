@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign up — ReaderHub</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <div class="brand"><span class="logo">📖</span> ReaderHub</div>
+    <div class="row"><a class="btn ghost small" href="/">Back</a></div>
+  </nav>
+  <section class="hero" style="padding-top:36px">
+    <h1 style="font-size:30px">Create your account</h1>
+    <p class="lead" style="font-size:15px">Use your school email. Your ReaderHub password should be new — never your school one.</p>
+  </section>
+  <form class="panel" id="f" style="margin-bottom:60px">
+    <label>Your name</label>
+    <input id="name" autocomplete="name" placeholder="Alex Turner">
+    <label>School email</label>
+    <input id="email" type="email" autocomplete="email" placeholder="you@school.org">
+    <label>Choose a password (new one, not your school password)</label>
+    <input id="pw" type="password" autocomplete="new-password" placeholder="At least 6 characters">
+    <div class="err" id="err"></div>
+    <button class="btn" style="width:100%;margin-top:6px">Sign up</button>
+    <p class="muted center" style="font-size:13px;margin-top:14px">Already have an account? <a href="/login.html">Log in</a></p>
+  </form>
+</div>
+<script>
+const f = document.getElementById('f');
+f.onsubmit = async (e) => {
+  e.preventDefault();
+  const err = document.getElementById('err');
+  err.textContent = '';
+  const nameEl = document.getElementById('name');
+  const emailEl = document.getElementById('email');
+  const pwEl = document.getElementById('pw');
+  const r = await fetch('/api/signup', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name: nameEl.value, email: emailEl.value, password: pwEl.value })
+  });
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) { location.href = '/app.html'; }
+  else err.textContent = j.error || 'Signup failed';
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin — ReaderHub</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <div class="brand"><span class="logo">🛠️</span> ReaderHub Admin</div>
+    <div class="row">
+      <span class="muted" id="who" style="font-size:14px"></span>
+      <button class="btn ghost small" id="logout">Log out</button>
+    </div>
+  </nav>
+
+  <div id="notauth" style="display:none" class="notice">Admin access only. Log in with the admin account.</div>
+
+  <section class="section" id="main" style="display:none">
+    <div class="tabs">
+      <div class="tab active" data-tab="requests">Waiting list <span id="reqBadge"></span></div>
+      <div class="tab" data-tab="students">Students</div>
+      <div class="tab" data-tab="broadcast">Broadcast</div>
+    </div>
+
+    <!-- REQUESTS -->
+    <div id="tab-requests">
+      <h3 style="margin-bottom:12px">Waiting list (orders to complete)</h3>
+      <div id="reqList"></div>
+      <p class="muted" id="resetInfo" style="font-size:13px;margin-top:12px"></p>
+    </div>
+
+    <!-- STUDENTS -->
+    <div id="tab-students" style="display:none">
+      <div style="overflow-x:auto"><table class="list" id="stuTable">
+        <thead><tr><th>Student</th><th>Status</th><th>XP</th><th>Streak</th><th>Unread</th><th>Actions</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </div>
+
+    <!-- BROADCAST -->
+    <div id="tab-broadcast" style="display:none">
+      <form class="panel" id="bcForm" style="margin:0;max-width:560px">
+        <h3 style="margin-bottom:4px">Message every student</h3>
+        <p class="muted" style="font-size:13px">Lands in each student's Coach chat.</p>
+        <label>Message</label>
+        <textarea id="bcText" rows="4" placeholder="Reminder: 30 mins of practice this week keeps your streak alive…"></textarea>
+        <div class="ok" id="bcOk"></div>
+        <button class="btn" style="margin-top:10px">Send to all</button>
+      </form>
+    </div>
+
+    <!-- STUDENT CHAT DRAWER -->
+    <div id="chatModal" style="display:none">
+      <hr style="border-color:var(--line);margin:24px 0">
+      <div class="spread"><h3 id="chatWith">Chat</h3><button class="btn ghost small" onclick="closeChat()">Close chat</button></div>
+      <div class="chat" id="chatBox"></div>
+      <div class="row" style="margin-top:12px">
+        <input id="chatInput" placeholder="Type a reply…" style="flex:1;min-width:220px">
+        <button class="btn" id="chatSend">Send</button>
+      </div>
+    </div>
+  </section>
+
+  <footer>ReaderHub admin</footer>
+</div>
+<script>
+let me = null, chatTarget = null;
+const $ = (id) => document.getElementById(id);
+
+async function refresh() {
+  const r = await fetch('/api/me');
+  if (!r.ok) { $('notauth').style.display = 'block'; return; }
+  me = await r.json();
+  if (me.role !== 'admin') { $('notauth').style.display = 'block'; return; }
+  $('main').style.display = 'block';
+  $('who').textContent = me.email;
+  loadOverview();
+}
+
+async function loadOverview() {
+  const j = await (await fetch('/api/admin/overview')).json();
+  $('resetInfo').textContent = j.weekResetAt ? `⏱ Everything resets Sunday 6pm — next: ${new Date(j.weekResetAt).toLocaleString('en-GB', { weekday: 'long', hour: '2-digit', minute: '2-digit' })}. Week passes end then; 4-week passes keep going.` : '';
+  // waiting list — two separate lists: £1 week and £3 four-week
+  $('reqBadge').textContent = j.orders.length ? `(${j.orders.length})` : '';
+  const finDate = (plan) => new Date(plan === 'month' ? j.weekResetAt + 21 * 86400000 : j.weekResetAt)
+    .toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }) + ' 6pm';
+  const orderCard = (o) => {
+    const plan = o.plan === 'week' ? '1 week — £1' : '4 week — £3';
+    return `<div class="card" style="margin-bottom:12px;max-width:640px">
+      <div class="spread">
+        <div><strong>${o.name}</strong> <span class="muted">${o.email}</span><br>
+        <span class="muted" style="font-size:13px">${plan} · joined ${new Date(o.at).toLocaleString()} · finishes ${finDate(o.plan)}</span></div>
+        <div class="row">
+          <button class="btn good small" onclick="completeOrder('${o.id}')">✓ Complete</button>
+          <button class="btn danger small" onclick="removeOrder('${o.id}')">Remove</button>
+        </div>
+      </div></div>`;
+  };
+  const wk = j.orders.filter(o => o.plan === 'week');
+  const mo = j.orders.filter(o => o.plan === 'month');
+  $('reqList').innerHTML =
+    `<h4 style="margin:8px 0">£1 — 1 week list (${wk.length})</h4>` +
+    (wk.length ? wk.map(orderCard).join('') : '<p class="muted" style="margin:4px 0 16px">Empty.</p>') +
+    `<h4 style="margin:16px 0 8px">£3 — 4 week list (${mo.length})</h4>` +
+    (mo.length ? mo.map(orderCard).join('') : '<p class="muted" style="margin:4px 0">Empty.</p>');
+
+  // students
+  $('stuTable').querySelector('tbody').innerHTML = j.students.map(s => {
+    const status = s.bannedUntil
+      ? `<span class="pill off">⛔ Banned · ${Math.ceil((s.bannedUntil - Date.now()) / 86400000)}d left</span>`
+      : s.active
+        ? `<span class="pill on">Active · ${Math.ceil((s.expiresAt - Date.now()) / 86400000)}d left</span>`
+        : '<span class="pill off">No pass</span>';
+    const actions = s.bannedUntil
+      ? `<button class="btn good small" onclick="unban('${s.email}')">Unban</button>`
+      : `<button class="btn small" onclick="openChat('${s.email}','${s.name}')">Chat</button>
+         <select id="banSel-${s.email.replace(/[^a-z0-9]/g,'')}" style="width:auto;padding:6px">
+           <option value="1">1 day</option><option value="7" selected>7 days</option>
+           <option value="14">14 days</option><option value="28">28 days</option><option value="90">90 days</option>
+         </select>
+         <button class="btn danger small" onclick="ban('${s.email}')">Ban</button>
+         ${s.active ? `<button class="btn danger small" onclick="revoke('${s.email}')">Revoke</button>` : ''}`;
+    return `<tr${s.bannedUntil ? ' style="opacity:.6"' : ''}>
+      <td><strong>${s.name}</strong><br><span class="muted" style="font-size:12px">${s.email}</span></td>
+      <td>${status}</td><td>${s.xp}</td><td>${s.streak}</td>
+      <td>${s.unread ? `<strong style="color:#ffe07a">${s.unread}</strong>` : '0'}</td>
+      <td><div class="row">${actions}</div></td></tr>`;
+  }).join('') || '<tr><td colspan="6" class="muted">No students yet — share the signup link!</td></tr>';
+}
+
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  t.classList.add('active');
+  ['requests','students','broadcast'].forEach(n => $('tab-' + n).style.display = n === t.dataset.tab ? 'block' : 'none');
+});
+
+async function completeOrder(id) {
+  await fetch('/api/admin/complete-order', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ id }) });
+  loadOverview();
+}
+async function removeOrder(id) {
+  await fetch('/api/admin/remove-order', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ id }) });
+  loadOverview();
+}
+async function grant(email, plan) {
+  await fetch('/api/admin/grant', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ email, plan }) });
+  loadOverview();
+}
+async function revoke(email) {
+  await fetch('/api/admin/revoke', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ email }) });
+  loadOverview();
+}
+function banSelId(email) { return 'banSel-' + email.replace(/[^a-z0-9]/g, ''); }
+async function ban(email) {
+  const days = document.getElementById(banSelId(email)).value;
+  await fetch('/api/admin/ban', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ email, days: Number(days) }) });
+  loadOverview();
+}
+async function unban(email) {
+  await fetch('/api/admin/unban', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ email }) });
+  loadOverview();
+}
+
+async function openChat(email, name) {
+  chatTarget = email;
+  $('chatModal').style.display = 'block';
+  $('chatWith').textContent = 'Chat with ' + name;
+  const j = await (await fetch('/api/admin/thread?student=' + encodeURIComponent(email))).json();
+  $('chatBox').innerHTML = j.messages.map(m => `
+    <div class="msg ${m.from === 'me' ? 'me' : 'them'}">${m.body}<span class="t">${new Date(m.at).toLocaleString()}</span></div>`).join('') ||
+    '<div class="muted center" style="margin:auto">No messages yet.</div>';
+  $('chatBox').scrollTop = $('chatBox').scrollHeight;
+  loadOverview();
+}
+function closeChat() { chatTarget = null; $('chatModal').style.display = 'none'; }
+async function sendReply() {
+  const text = $('chatInput').value.trim();
+  if (!text || !chatTarget) return;
+  $('chatInput').value = '';
+  await fetch('/api/admin/reply', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ to: chatTarget, body: text }) });
+  openChat(chatTarget, $('chatWith').textContent.replace('Chat with ', ''));
+}
+$('chatSend').onclick = sendReply;
+$('chatInput').onkeydown = (e) => { if (e.key === 'Enter') sendReply(); };
+
+$('bcForm').onsubmit = async (e) => {
+  e.preventDefault();
+  $('bcOk').textContent = '';
+  await fetch('/api/admin/broadcast', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ body: $('bcText').value }) });
+  $('bcOk').textContent = 'Sent to all students ✓';
+  $('bcText').value = '';
+};
+
+$('logout').onclick = async () => { await fetch('/api/logout', { method: 'POST' }); location.href = '/'; };
+
+refresh();
+</script>
+</body>
+</html>

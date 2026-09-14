@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard — ReaderHub</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <div class="brand"><span class="logo">📖</span> ReaderHub</div>
+    <div class="row">
+      <span class="muted" id="who" style="font-size:14px"></span>
+      <button class="btn ghost small" id="logout">Log out</button>
+    </div>
+  </nav>
+
+  <div id="notauth" style="display:none" class="notice">Please log in first.</div>
+
+  <section class="section" id="main" style="display:none">
+    <div class="spread" style="margin-bottom:16px">
+      <h2 id="hello">Your dashboard</h2>
+      <span id="accessPill" class="pill off">No active pass</span>
+    </div>
+
+    <div class="statgrid">
+      <div class="stat"><div class="num" id="stXp">0</div><div class="lbl">XP</div></div>
+      <div class="stat"><div class="num" id="stStreak">0</div><div class="lbl">Day streak</div></div>
+      <div class="stat"><div class="num" id="stAccess">—</div><div class="lbl">Pass</div></div>
+      <div class="stat"><div class="num" id="stUnread">0</div><div class="lbl">New messages</div></div>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active" data-tab="practice">Practice</div>
+      <div class="tab" data-tab="pass">Get a pass</div>
+      <div class="tab" data-tab="chat">Coach chat <span id="chatDot" style="display:none;color:#ffe07a">●</span></div>
+      <div class="tab" data-tab="settings">Settings</div>
+    </div>
+
+    <!-- PRACTICE -->
+    <div id="tab-practice">
+      <div id="passages"></div>
+      <div id="quiz" style="display:none"></div>
+    </div>
+
+    <!-- PASS -->
+    <div id="tab-pass" style="display:none">
+      <div class="cards" style="max-width:760px">
+        <div class="card feature">
+          <h3>1 week pass</h3>
+          <div class="price">£1</div>
+          <ul class="perks"><li>Full library until Sunday 6pm</li><li>Unlimited attempts</li></ul>
+          <button class="btn" data-plan="week">Join waiting list — £1</button>
+        </div>
+        <div class="card">
+          <h3>4 week pass</h3>
+          <div class="price">£3</div>
+          <ul class="perks"><li>Full library, ends a Sunday 6pm</li><li>Runs 4 weeks — skips 3 resets</li></ul>
+          <button class="btn ghost" data-plan="month">Join waiting list — £3</button>
+        </div>
+      </div>
+      <div class="ok" id="reqOk"></div>
+      <div class="err" id="reqErr"></div>
+      <p class="muted" style="font-size:13px">Join the waiting list, pay your coach in real life (cash or bank transfer — never through this site), and once he marks your order Complete, your pass unlocks. Everything resets Sunday 6pm — weekly people rejoin and repay; 4-week passes keep going.</p>
+    </div>
+
+    <!-- CHAT -->
+    <div id="tab-chat" style="display:none">
+      <div class="chat" id="chatBox"></div>
+      <div class="row" style="margin-top:12px">
+        <input id="chatInput" placeholder="Message your coach…" style="flex:1;min-width:220px">
+        <button class="btn" id="chatSend">Send</button>
+      </div>
+    </div>
+
+    <!-- SETTINGS -->
+    <div id="tab-settings" style="display:none">
+      <form class="panel" id="pwForm" style="margin:0">
+        <h3 style="margin-bottom:4px">Change password</h3>
+        <p class="muted" style="font-size:13px">This is your ReaderHub password only. Never reuse your school password.</p>
+        <label>Current password</label><input id="cur" type="password" autocomplete="current-password">
+        <label>New password</label><input id="next" type="password" autocomplete="new-password">
+        <div class="err" id="pwErr"></div><div class="ok" id="pwOk"></div>
+        <button class="btn">Save</button>
+      </form>
+    </div>
+  </section>
+
+  <footer>ReaderHub · practice makes progress</footer>
+</div>
+<script>
+let me = null;
+const $ = (id) => document.getElementById(id);
+
+async function refresh() {
+  const r = await fetch('/api/me');
+  if (!r.ok) { $('notauth').style.display = 'block'; return; }
+  me = await r.json();
+  $('main').style.display = 'block';
+  $('who').textContent = me.name;
+  $('hello').textContent = `Hi ${me.name.split(' ')[0]} 👋`;
+  $('stXp').textContent = me.xp;
+  $('stStreak').textContent = me.streak;
+  $('stAccess').textContent = me.access ? 'Active' : 'None';
+  $('stUnread').textContent = me.unread;
+  $('chatDot').style.display = me.unread > 0 ? 'inline' : 'none';
+  const pill = $('accessPill');
+  if (me.access) {
+    const d = Math.ceil((me.access.expiresAt - Date.now()) / 86400000);
+    pill.className = 'pill on'; pill.textContent = `${me.access.plan === 'week' ? '1 week' : '4 week'} pass · ${d}d left`;
+  } else if (me.bannedUntil) {
+    pill.className = 'pill off'; pill.textContent = `⛔ Blocked from passes until ${new Date(me.bannedUntil).toLocaleDateString('en-GB')}`;
+  } else if (me.pendingOrder) {
+    pill.className = 'pill wait'; pill.textContent = 'On waiting list — order awaiting payment';
+  } else { pill.className = 'pill off'; pill.textContent = 'No active pass'; }
+}
+
+// tabs
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  t.classList.add('active');
+  ['practice','pass','chat','settings'].forEach(n => $('tab-' + n).style.display = n === t.dataset.tab ? 'block' : 'none');
+  if (t.dataset.tab === 'chat') loadChat();
+  if (t.dataset.tab === 'practice') location.hash = '';
+});
+
+// practice
+async function loadPassages() {
+  const j = await (await fetch('/api/practice')).json();
+  $('passages').innerHTML = j.passages.map(p => `
+    <div class="passage">
+      <div class="spread"><h3>${p.title}</h3>
+      ${p.locked ? '<span class="pill off">🔒 Needs pass</span>' : '<span class="pill on">Open</span>'}</div>
+      <div class="text">${p.text}</div>
+      ${p.locked
+        ? '<button class="btn ghost" onclick="switchTab(\'pass\')">Unlock with a pass</button>'
+        : `<button class="btn small" onclick="startQuiz('${p.id}')">Start questions</button>`}
+    </div>`).join('');
+}
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.tab === name));
+  ['practice','pass','chat','settings'].forEach(n => $('tab-' + n).style.display = n === name ? 'block' : 'none');
+  if (name === 'chat') loadChat();
+}
+let quizPassage = null;
+async function startQuiz(id) {
+  const j = await (await fetch('/api/practice')).json();
+  quizPassage = j.passages.find(p => p.id === id);
+  // questions+answers stay server-side; fetch the quiz sheet
+  const q = await (await fetch('/api/quiz?passageId=' + id)).json();
+  $('quiz').innerHTML = `
+    <div class="passage">
+      <h3>${quizPassage.title}</h3>
+      <div class="text">${quizPassage.text}</div>
+      <div id="qs">${q.questions.map((x, i) => `
+        <div class="q"><div class="qq">${i + 1}. ${x.q}</div>
+        ${x.choices.map((c, ci) => `<label class="opt" id="opt-${i}-${ci}"><input type="radio" name="q${i}" value="${ci}" onchange="markPicked(${i},${ci})"> ${c}</label>`).join('')}
+        </div>`).join('')}</div>
+      <div class="row"><button class="btn" id="submitQuiz">Submit answers</button>
+      <button class="btn ghost" onclick="backToPassages()">Back</button></div>
+      <div class="ok" id="quizOk"></div>
+    </div>`;
+  $('passages').style.display = 'none';
+  $('quiz').style.display = 'block';
+  $('submitQuiz').onclick = submitQuiz;
+  window.markPicked = (i, ci) => {
+    for (let c = 0; c < 4; c++) { const el = $('opt-' + i + '-' + c); if (el) el.classList.remove('correct','wrong'); }
+    $('opt-' + i + '-' + ci).classList.add('picked');
+  };
+}
+function backToPassages() { $('quiz').style.display = 'none'; $('passages').style.display = 'block'; }
+async function submitQuiz() {
+  const answers = [];
+  for (let i = 0; i < 4; i++) {
+    const pick = document.querySelector(`input[name="q${i}"]:checked`);
+    answers.push(pick ? parseInt(pick.value) : -1);
+  }
+  const r = await fetch('/api/practice/submit', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ passageId: quizPassage.id, answers })
+  });
+  const j = await r.json();
+  if (!r.ok) return ($('quizOk').textContent = j.error || 'Error');
+  j.results.forEach((res, i) => {
+    const correctEl = document.querySelector(`input[name="q${i}"][value="${res.correctIndex}"]`).closest('.opt');
+    correctEl.classList.add('correct');
+    if (!res.correct) {
+      const pick = document.querySelector(`input[name="q${i}"]:checked`);
+      if (pick) pick.closest('.opt').classList.add('wrong');
+    }
+  });
+  $('quizOk').textContent = `🎉 ${j.correct}/${j.total} correct · +${j.correct * 10} XP · ${j.streak} day streak`;
+  refresh();
+}
+
+// waiting list: join an order; coach completes it after payment
+document.querySelectorAll('#tab-pass [data-plan]').forEach(b => b.onclick = async () => {
+  $('reqOk').textContent = ''; $('reqErr').textContent = '';
+  const r = await fetch('/api/order-pass', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ plan: b.dataset.plan })
+  });
+  const j = await r.json();
+  if (r.ok) { $("reqOk").textContent = "✅ You're on the waiting list! Pay your coach, then they click Complete on your order."; refresh(); }
+  else $('reqErr').textContent = j.error || 'Error';
+});
+
+// chat
+async function loadChat() {
+  const j = await (await fetch('/api/messages')).json();
+  $('chatBox').innerHTML = j.messages.map(m => `
+    <div class="msg ${m.from === 'me' ? 'me' : 'them'}">${m.body}<span class="t">${new Date(m.at).toLocaleString()}</span></div>`).join('') ||
+    '<div class="muted center" style="margin:auto">No messages yet — say hi!</div>';
+  $('chatBox').scrollTop = $('chatBox').scrollHeight;
+}
+async function sendChat() {
+  const text = $('chatInput').value.trim();
+  if (!text) return;
+  $('chatInput').value = '';
+  await fetch('/api/messages', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ body: text }) });
+  loadChat();
+}
+$('chatSend').onclick = sendChat;
+$('chatInput').onkeydown = (e) => { if (e.key === 'Enter') sendChat(); };
+
+// settings
+$('pwForm').onsubmit = async (e) => {
+  e.preventDefault();
+  $('pwErr').textContent = ''; $('pwOk').textContent = '';
+  const r = await fetch('/api/change-password', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ current: cur.value, next: next.value })
+  });
+  const j = await r.json();
+  if (r.ok) { $('pwOk').textContent = 'Password changed ✓'; cur.value = next.value = ''; }
+  else $('pwErr').textContent = j.error || 'Error';
+};
+
+$('logout').onclick = async () => { await fetch('/api/logout', { method: 'POST' }); location.href = '/'; };
+
+refresh().then(() => { if (me) loadPassages(); });
+</script>
+</body>
+</html>

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Log in — ReaderHub</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <div class="brand"><span class="logo">📖</span> ReaderHub</div>
+    <div class="row"><a class="btn ghost small" href="/">Back</a></div>
+  </nav>
+  <section class="hero" style="padding-top:36px">
+    <h1 style="font-size:30px">Welcome back</h1>
+  </section>
+  <form class="panel" id="f" style="margin-bottom:60px">
+    <label>Email</label>
+    <input id="email" type="email" autocomplete="email">
+    <label>Password</label>
+    <input id="pw" type="password" autocomplete="current-password">
+    <div class="err" id="err"></div>
+    <button class="btn" style="width:100%;margin-top:6px">Log in</button>
+    <p class="muted center" style="font-size:13px;margin-top:14px">New here? <a href="/signup.html">Create an account</a></p>
+  </form>
+</div>
+<script>
+document.getElementById('f').onsubmit = async (e) => {
+  e.preventDefault();
+  const err = document.getElementById('err');
+  err.textContent = '';
+  const emailEl = document.getElementById('email');
+  const pwEl = document.getElementById('pw');
+  const r = await fetch('/api/login', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ email: emailEl.value, password: pwEl.value })
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) return (err.textContent = j.error || 'Login failed');
+  const me = await (await fetch('/api/me')).json().catch(() => ({}));
+  location.href = me.role === 'admin' ? '/admin.html' : '/app.html';
+};
+</script>
+</body>
+</html>
