@@ -21,19 +21,90 @@ const SCHOOL_DOMAINS = [];
 
 const PLANS = {
   week: { id: 'week', label: '1 week pass', price: '£1', days: 7 },
+  twoweek: { id: 'twoweek', label: '2 week pass', price: '£2', days: 14 },
   month: { id: 'month', label: '4 week pass', price: '£3', days: 28 },
+  term: { id: 'term', label: '12 week pass', price: '£9', days: 84 },
 };
 
 // ---------- tiny JSON DB ----------
+// Storage backends, chosen by env:
+//  - TURSO_DATABASE_URL (+ TURSO_AUTH_TOKEN): Turso hosted SQLite over HTTP -> survives redeploys/spin-downs
+//  - otherwise: local file data/db.json (dev use; wiped on Render free tier)
 let db = null;
-function loadDb() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (fs.existsSync(DB_FILE)) {
-    db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-  } else {
-    db = { users: [], sessions: {}, requests: [], orders: [], messages: [] };
+let dbReady = null; // promise
+let cloudLoaded = false; // turso mode: true once remote state has been read successfully
+let TURSO_URL = process.env.TURSO_DATABASE_URL || null;
+if (TURSO_URL && TURSO_URL.startsWith('libsql://')) TURSO_URL = 'https://' + TURSO_URL.slice('libsql://'.length);
+if (TURSO_URL) TURSO_URL = TURSO_URL.replace(/\/$/, '');
+const TURSO_TOKEN = process.env.TURSO_AUTH_TOKEN || '';
+const RELOAD_MS = Number(process.env.DB_RELOAD_MS) || 30000;
+
+function tursoArg(a) {
+  if (a === null || a === undefined) return { type: 'null' };
+  if (typeof a === 'string') return { type: 'text', value: a };
+  if (Number.isInteger(a)) return { type: 'integer', value: a };
+  if (typeof a === 'number') return { type: 'float', value: a };
+  return a; // already a Hrana value
+}
+let saveChain = Promise.resolve();
+function tursoExec(stmts) {
+  // stmts: [{q, args}] executed in order in an implicit transaction
+  return fetch(`${TURSO_URL}/v2/pipeline`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(TURSO_TOKEN ? { Authorization: `Bearer ${TURSO_TOKEN}` } : {}) },
+    signal: AbortSignal.timeout(10000),
+    body: JSON.stringify({ requests: stmts.map((s) => ({ type: 'execute', stmt: { sql: s.q, args: (s.args || []).map(tursoArg) } })).concat([{ type: 'close' }]) }),
+  }).then(async (r) => {
+    if (!r.ok) throw new Error(`Turso HTTP ${r.status}: ${await r.text()}`);
+    return r.json();
+  });
+}
+
+function storeSave() {
+  const blob = JSON.stringify(db, null, 1);
+  if (TURSO_URL) {
+    if (!cloudLoaded) { console.error('DB save skipped: remote state unverified (initial load still retrying)'); return saveChain; }
+    const write = () => tursoExec([{ q: 'CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)' }, { q: "INSERT INTO kv (k, v) VALUES ('db', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v", args: [blob] }]).catch((e) => console.error('DB save failed:', e.message));
+    saveChain = saveChain.then(write, write);
+    return saveChain;
   }
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(DB_FILE, blob);
+  return Promise.resolve();
+}
+function storeLoad() {
+  // resolves with parsed db (or null = empty store); rejects on transport/protocol errors
+  if (TURSO_URL) {
+    return tursoExec([{ q: 'CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)' }, { q: "SELECT v FROM kv WHERE k = 'db'" }]).then((res) => {
+      const rows = res.results[1].response.result.rows;
+      if (!rows || !rows.length) return null;
+      const row = rows[0];
+      const cell = Array.isArray(row) ? row[0] : row;
+      const raw = cell && typeof cell === 'object' ? (cell.value !== undefined ? cell.value : cell.v) : cell;
+      return raw ? JSON.parse(raw) : null;
+    });
+  }
+  if (fs.existsSync(DB_FILE)) return Promise.resolve(JSON.parse(fs.readFileSync(DB_FILE, 'utf8')));
+  return Promise.resolve(null);
+}
+async function loadWithRetry(attempts = 3) {
+  for (let i = 0; i < attempts; i++) {
+    try { return { ok: true, data: await storeLoad() }; }
+    catch (e) {
+      console.error(`DB load attempt ${i + 1}/${attempts} failed:`, e.message);
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, 2000 * (i + 1)));
+    }
+  }
+  return { ok: false };
+}
+function adoptDb(data) {
+  db = data || { users: [], sessions: {}, requests: [], orders: [], messages: [], waitlist: [] };
   if (!db.orders) db.orders = [];
+  if (!db.waitlist) db.waitlist = [];
+  if (!db.sessions) db.sessions = {};
+  if (!db.users) db.users = [];
+  if (!db.messages) db.messages = [];
+  if (!db.requests) db.requests = [];
   if (!db.users.some((u) => u.role === 'admin')) {
     const salt = crypto.randomBytes(16).toString('hex');
     db.users.push({
@@ -47,19 +118,44 @@ function loadDb() {
       access: null, xp: 0, streak: 0, lastPractice: null,
     });
   }
-  saveDbSoon();
+}
+function scheduleRemoteReload() {
+  const t = setInterval(() => {
+    loadWithRetry(1).then(({ ok, data }) => {
+      if (!ok) return;
+      clearInterval(t);
+      cloudLoaded = true;
+      adoptDb(data);
+      console.log('DB recovered: loaded remote state');
+    });
+  }, RELOAD_MS);
+  t.unref();
+}
+function loadDb() {
+  dbReady = loadWithRetry().then(({ ok, data }) => {
+    if (ok) {
+      cloudLoaded = true;
+      adoptDb(data);
+      return storeSave();
+    }
+    console.error('DB unavailable after retries — serving empty in-memory state; remote will NOT be overwritten until it can be read');
+    adoptDb(null);
+    scheduleRemoteReload();
+  });
 }
 let saveTimer = null;
-function saveDbNow() {
-  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 1));
-}
+function saveDbNow() { if (db) storeSave(); }
 function saveDbSoon() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveDbNow, 300);
 }
 process.on('exit', saveDbNow);
 process.on('SIGINT', () => { saveDbNow(); process.exit(0); });
-process.on('SIGTERM', () => { saveDbNow(); process.exit(0); });
+process.on('SIGTERM', () => {
+  clearTimeout(saveTimer);
+  Promise.resolve(storeSave()).catch(() => {}).then(() => process.exit(0));
+  setTimeout(() => process.exit(0), 2000).unref();
+});
 
 // ---------- helpers ----------
 function hashPassword(pw, salt) {
@@ -160,6 +256,7 @@ function rateLimited(ip) {
 }
 
 async function handleApi(req, res, pathname) {
+  await dbReady;
   const user = getUser(req);
   const ip = req.socket.remoteAddress || '?';
   const url = new URL(req.url, 'http://x');
@@ -207,10 +304,12 @@ async function handleApi(req, res, pathname) {
   if (route === 'GET /api/me') {
     if (!user) return sendJson(res, 401, { error: 'Not logged in' });
     const pendingOrder = db.orders.find((o) => o.email === user.email && o.status === 'pending');
+    const wl = db.waitlist.find((w) => w.email === user.email && (w.status === 'pending' || w.status === 'approved'));
     return sendJson(res, 200, {
       email: user.email, name: user.name, role: user.role,
       access: accessActive(user) ? { plan: user.access.plan, expiresAt: user.access.expiresAt } : null,
       pendingOrder: pendingOrder ? { plan: pendingOrder.plan, at: pendingOrder.at } : null,
+      waitlist: wl ? { plan: wl.plan, status: wl.status, at: wl.at } : null,
       weekResetAt: nextSundayCutoff(),
       bannedUntil: user.ban && user.ban.until > Date.now() ? user.ban.until : null,
       xp: user.xp, streak: user.streak, unread: unreadCount(user, 'admin'),
@@ -240,6 +339,20 @@ async function handleApi(req, res, pathname) {
     if (db.orders.some((o) => o.email === user.email && o.status === 'pending'))
       return sendJson(res, 400, { error: 'You are already on the waiting list' });
     db.orders.push({ id: crypto.randomUUID(), email: user.email, name: user.name, plan: body.plan, status: 'pending', at: Date.now() });
+    saveDbSoon();
+    return sendJson(res, 200, { ok: true });
+  }
+
+  // approval waiting list: student picks a size, admin approves
+  if (route === 'POST /api/waitlist') {
+    weeklyReset();
+    const body = await readBody(req);
+    if (!body || !PLANS[body.plan]) return sendJson(res, 400, { error: 'Pick a plan' });
+    if (user.ban && user.ban.until > Date.now())
+      return sendJson(res, 403, { error: `Banned from getting passes until ${new Date(user.ban.until).toLocaleDateString('en-GB')}` });
+    if (db.waitlist.some((w) => w.email === user.email && (w.status === 'pending' || w.status === 'approved')))
+      return sendJson(res, 400, { error: 'You already have a spot requested or approved' });
+    db.waitlist.push({ id: crypto.randomUUID(), email: user.email, name: user.name, plan: body.plan, status: 'pending', at: Date.now() });
     saveDbSoon();
     return sendJson(res, 200, { ok: true });
   }
@@ -315,7 +428,7 @@ async function handleApi(req, res, pathname) {
     if (!body || !PLANS[body.plan]) return sendJson(res, 400, { error: 'Bad request' });
     const target = db.users.find((u) => u.email === String(body.email || '').toLowerCase());
     if (!target || target.role !== 'student') return sendJson(res, 404, { error: 'No such student' });
-    target.access = { plan: body.plan, expiresAt: body.plan === 'month' ? nextSundayCutoff() + 21 * 86400000 : nextSundayCutoff() };
+    target.access = { plan: body.plan, expiresAt: passExpiry(body.plan) };
     saveDbSoon();
     return sendJson(res, 200, { ok: true });
   }
@@ -359,7 +472,7 @@ async function handleApi(req, res, pathname) {
     const target = db.users.find((u) => u.email === o.email);
     if (!target) return sendJson(res, 404, { error: 'Student gone' });
     o.status = 'completed';
-    target.access = { plan: o.plan, expiresAt: o.plan === 'month' ? nextSundayCutoff() + 21 * 86400000 : nextSundayCutoff() }; // ends a Sunday 18:00
+    target.access = { plan: o.plan, expiresAt: passExpiry(o.plan) }; // always ends a Sunday 18:00
     db.messages.push({ id: crypto.randomUUID(), from: 'admin', to: target.email, body: `Payment received — your pass is active until Sunday 6pm. Practice is unlocked. Good luck!`, at: Date.now(), read: false });
     saveDbSoon();
     return sendJson(res, 200, { ok: true });
@@ -372,6 +485,37 @@ async function handleApi(req, res, pathname) {
     if (!o) return sendJson(res, 404, { error: 'No such order' });
     o.status = 'removed';
     db.messages.push({ id: crypto.randomUUID(), from: 'admin', to: o.email, body: 'Your pass order was removed from the waiting list. Message me if you think that is a mistake.', at: Date.now(), read: false });
+    saveDbSoon();
+    return sendJson(res, 200, { ok: true });
+  }
+
+  if (route === 'GET /api/admin/waitlist') {
+    weeklyReset();
+    return sendJson(res, 200, {
+      pending: db.waitlist.filter((w) => w.status === 'pending'),
+      approved: db.waitlist.filter((w) => w.status === 'approved'),
+      weekResetAt: nextSundayCutoff(),
+    });
+  }
+
+  if (route === 'POST /api/admin/waitlist/approve') {
+    const body = await readBody(req);
+    const w = db.waitlist.find((x) => x.id === (body && body.id) && x.status === 'pending');
+    if (!w) return sendJson(res, 404, { error: 'No such request' });
+    w.status = 'approved'; w.approvedAt = Date.now();
+    db.messages.push({ id: crypto.randomUUID(), from: 'admin', to: w.email,
+      body: `You're approved for the ${PLANS[w.plan].label} waiting list (${PLANS[w.plan].price}). Bring ${PLANS[w.plan].price} to your coach before Sunday 6pm to activate your pass.`,
+      at: Date.now(), read: false });
+    saveDbSoon();
+    return sendJson(res, 200, { ok: true });
+  }
+
+  if (route === 'POST /api/admin/waitlist/decline') {
+    const body = await readBody(req);
+    const w = db.waitlist.find((x) => x.id === (body && body.id) && x.status === 'pending');
+    if (!w) return sendJson(res, 404, { error: 'No such request' });
+    w.status = 'declined';
+    db.messages.push({ id: crypto.randomUUID(), from: 'admin', to: w.email, body: 'Your waiting list request was declined this time. Message me if you have a question.', at: Date.now(), read: false });
     saveDbSoon();
     return sendJson(res, 200, { ok: true });
   }
@@ -437,7 +581,9 @@ function lastSundayCutoff(nowMs) {
   return d;
 }
 function nextSundayCutoff(nowMs) { return lastSundayCutoff(nowMs).getTime() + 7 * 86400000; }
+function passExpiry(planId) { return nextSundayCutoff() + (PLANS[planId].days - 7) * 86400000; }
 function weeklyReset() {
+  if (!db) return false;
   const cutoff = lastSundayCutoff();
   if (!db.lastWeeklyReset) db.lastWeeklyReset = 0;
   if (db.lastWeeklyReset >= cutoff.getTime()) return false;
@@ -447,6 +593,7 @@ function weeklyReset() {
   });
   let expired = 0;
   (db.orders || []).forEach((o) => { if (o.status === 'pending' && londonWall(o.at) < cutoff) { o.status = 'expired'; expired++; } });
+  (db.waitlist || []).forEach((w) => { if ((w.status === 'pending' || w.status === 'approved') && londonWall(w.at) < cutoff) { w.status = 'expired'; expired++; } });
   db.lastWeeklyReset = cutoff.getTime();
   console.log(`weekly reset to ${cutoff.toISOString()}: cleared ${cleared} pass(es), expired ${expired} order(s)`);
   saveDbSoon();
@@ -455,7 +602,7 @@ function weeklyReset() {
 setInterval(weeklyReset, 5 * 60000).unref();
 
 loadDb();
-weeklyReset();
+dbReady.then(() => { try { weeklyReset(); } catch (e) { console.error(e); } });
 http.createServer(async (req, res) => {
   const pathname = new URL(req.url, 'http://x').pathname;
   try {

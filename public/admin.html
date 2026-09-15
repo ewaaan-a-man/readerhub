@@ -22,6 +22,7 @@
     <div class="tabs">
       <div class="tab active" data-tab="requests">Waiting list <span id="reqBadge"></span></div>
       <div class="tab" data-tab="students">Students</div>
+      <div class="tab" data-tab="approvals">Approvals <span id="wlBadge"></span></div>
       <div class="tab" data-tab="broadcast">Broadcast</div>
     </div>
 
@@ -30,6 +31,12 @@
       <h3 style="margin-bottom:12px">Waiting list (orders to complete)</h3>
       <div id="reqList"></div>
       <p class="muted" id="resetInfo" style="font-size:13px;margin-top:12px"></p>
+    </div>
+
+    <!-- APPROVALS -->
+    <div id="tab-approvals" style="display:none">
+      <h3 style="margin-bottom:12px">Waiting list requests — you approve</h3>
+      <div id="wlList"></div>
     </div>
 
     <!-- STUDENTS -->
@@ -70,6 +77,14 @@
 let me = null, chatTarget = null;
 const $ = (id) => document.getElementById(id);
 
+const PLAN_TXT = { week:'1 week — £1', twoweek:'2 weeks — £2', month:'4 weeks — £3', term:'12 weeks — £9' };
+const PLAN_DAYS = { week:7, twoweek:14, month:28, term:84 };
+function fmtCd(ms) {
+  if (ms <= 0) return 'expired';
+  const d = Math.floor(ms/86400000), h = Math.floor(ms%86400000/3600000), m = Math.floor(ms%3600000/60000), sec = Math.floor(ms%60000/1000);
+  return (d ? d+'d ' : '') + String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(sec).padStart(2,'0');
+}
+
 async function refresh() {
   const r = await fetch('/api/me');
   if (!r.ok) { $('notauth').style.display = 'block'; return; }
@@ -82,13 +97,13 @@ async function refresh() {
 
 async function loadOverview() {
   const j = await (await fetch('/api/admin/overview')).json();
-  $('resetInfo').textContent = j.weekResetAt ? `⏱ Everything resets Sunday 6pm — next: ${new Date(j.weekResetAt).toLocaleString('en-GB', { weekday: 'long', hour: '2-digit', minute: '2-digit' })}. Week passes end then; 4-week passes keep going.` : '';
+  if (j.weekResetAt) $('resetInfo').dataset.deadline = j.weekResetAt;
   // waiting list — two separate lists: £1 week and £3 four-week
   $('reqBadge').textContent = j.orders.length ? `(${j.orders.length})` : '';
-  const finDate = (plan) => new Date(plan === 'month' ? j.weekResetAt + 21 * 86400000 : j.weekResetAt)
+  const finDate = (plan) => new Date(j.weekResetAt + (PLAN_DAYS[plan] - 7) * 86400000)
     .toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }) + ' 6pm';
   const orderCard = (o) => {
-    const plan = o.plan === 'week' ? '1 week — £1' : '4 week — £3';
+    const plan = PLAN_TXT[o.plan] || o.plan;
     return `<div class="card" style="margin-bottom:12px;max-width:640px">
       <div class="spread">
         <div><strong>${o.name}</strong> <span class="muted">${o.email}</span><br>
@@ -99,20 +114,18 @@ async function loadOverview() {
         </div>
       </div></div>`;
   };
-  const wk = j.orders.filter(o => o.plan === 'week');
-  const mo = j.orders.filter(o => o.plan === 'month');
-  $('reqList').innerHTML =
-    `<h4 style="margin:8px 0">£1 — 1 week list (${wk.length})</h4>` +
-    (wk.length ? wk.map(orderCard).join('') : '<p class="muted" style="margin:4px 0 16px">Empty.</p>') +
-    `<h4 style="margin:16px 0 8px">£3 — 4 week list (${mo.length})</h4>` +
-    (mo.length ? mo.map(orderCard).join('') : '<p class="muted" style="margin:4px 0">Empty.</p>');
+  $('reqList').innerHTML = ['week','twoweek','month','term'].map(p => {
+    const list = j.orders.filter(o => o.plan === p);
+    return `<h4 style="margin:8px 0">${PLAN_TXT[p]} (${list.length})</h4>` +
+      (list.length ? list.map(orderCard).join('') : '<p class="muted" style="margin:4px 0 16px">Empty.</p>');
+  }).join('');
 
   // students
   $('stuTable').querySelector('tbody').innerHTML = j.students.map(s => {
     const status = s.bannedUntil
       ? `<span class="pill off">⛔ Banned · ${Math.ceil((s.bannedUntil - Date.now()) / 86400000)}d left</span>`
       : s.active
-        ? `<span class="pill on">Active · ${Math.ceil((s.expiresAt - Date.now()) / 86400000)}d left</span>`
+        ? `<span class="pill on">Active · <strong data-cd="${s.expiresAt}"></strong> left</span>`
         : '<span class="pill off">No pass</span>';
     const actions = s.bannedUntil
       ? `<button class="btn good small" onclick="unban('${s.email}')">Unban</button>`
@@ -134,7 +147,8 @@ async function loadOverview() {
 document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
   document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
   t.classList.add('active');
-  ['requests','students','broadcast'].forEach(n => $('tab-' + n).style.display = n === t.dataset.tab ? 'block' : 'none');
+  ['requests','students','approvals','broadcast'].forEach(n => $('tab-' + n).style.display = n === t.dataset.tab ? 'block' : 'none');
+  if (t.dataset.tab === 'approvals') loadApprovals();
 });
 
 async function completeOrder(id) {
@@ -193,6 +207,30 @@ $('bcForm').onsubmit = async (e) => {
   $('bcOk').textContent = 'Sent to all students ✓';
   $('bcText').value = '';
 };
+
+async function loadApprovals() {
+  const j = await (await fetch('/api/admin/waitlist')).json();
+  $('wlBadge').textContent = j.pending.length ? `(${j.pending.length})` : '';
+  const row = (w, actions) => `<div class="card" style="margin-bottom:12px;max-width:640px"><div class="spread"><div><strong>${w.name}</strong> <span class="muted">${w.email}</span><br><span class="muted" style="font-size:13px">${PLAN_TXT[w.plan]} · requested ${new Date(w.at).toLocaleString()}</span></div><div class="row">${actions}</div></div></div>`;
+  $('wlList').innerHTML =
+    `<h4 style="margin:8px 0">Waiting for your approval (${j.pending.length})</h4>` +
+    (j.pending.length ? j.pending.map(w => row(w, `<button class="btn good small" onclick="approveWl('${w.id}')">✓ Approve</button> <button class="btn danger small" onclick="declineWl('${w.id}')">Decline</button>`)).join('') : '<p class="muted">No requests.</p>') +
+    `<h4 style="margin:16px 0 8px">Approved — time left to pay (${j.approved.length})</h4>` +
+    (j.approved.length ? j.approved.map(w => row(w, `<span class="pill on">⏱ <strong data-cd="${j.weekResetAt}"></strong> left</span>`)).join('') : '<p class="muted">Nobody approved yet.</p>');
+}
+async function approveWl(id) {
+  await fetch('/api/admin/waitlist/approve', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ id }) });
+  loadApprovals();
+}
+async function declineWl(id) {
+  await fetch('/api/admin/waitlist/decline', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ id }) });
+  loadApprovals();
+}
+setInterval(() => {
+  document.querySelectorAll('[data-cd]').forEach(el => { el.textContent = fmtCd(+el.dataset.cd - Date.now()); });
+  const ri = $('resetInfo');
+  if (ri.dataset.deadline) ri.textContent = `⏱ Everything resets Sunday 6pm — time left: ${fmtCd(+ri.dataset.deadline - Date.now())}. Longer passes keep going.`;
+}, 1000);
 
 $('logout').onclick = async () => { await fetch('/api/logout', { method: 'POST' }); location.href = '/'; };
 

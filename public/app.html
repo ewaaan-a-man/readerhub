@@ -46,23 +46,30 @@
 
     <!-- PASS -->
     <div id="tab-pass" style="display:none">
-      <div class="cards" style="max-width:760px">
-        <div class="card feature">
-          <h3>1 week pass</h3>
-          <div class="price">£1</div>
-          <ul class="perks"><li>Full library until Sunday 6pm</li><li>Unlimited attempts</li></ul>
-          <button class="btn" data-plan="week">Join waiting list — £1</button>
-        </div>
-        <div class="card">
-          <h3>4 week pass</h3>
-          <div class="price">£3</div>
-          <ul class="perks"><li>Full library, ends a Sunday 6pm</li><li>Runs 4 weeks — skips 3 resets</li></ul>
-          <button class="btn ghost" data-plan="month">Join waiting list — £3</button>
-        </div>
-      </div>
       <div class="ok" id="reqOk"></div>
       <div class="err" id="reqErr"></div>
-      <p class="muted" style="font-size:13px">Join the waiting list, pay your coach in real life (cash or bank transfer — never through this site), and once he marks your order Complete, your pass unlocks. Everything resets Sunday 6pm — weekly people rejoin and repay; 4-week passes keep going.</p>
+      <div class="cards" style="max-width:860px">
+        <div class="card feature"><h3>1 week</h3><div class="price">£1</div><ul class="perks"><li>Full library until Sunday 6pm</li><li>Unlimited attempts</li></ul><button class="btn" data-plan="week">Join waiting list — free</button></div>
+        <div class="card"><h3>2 weeks</h3><div class="price">£2</div><ul class="perks"><li>Ends a Sunday 6pm</li><li>Skips 1 reset</li></ul><button class="btn ghost" data-plan="twoweek">Join waiting list — free</button></div>
+        <div class="card"><h3>4 weeks</h3><div class="price">£3</div><ul class="perks"><li>Ends a Sunday 6pm</li><li>Skips 3 resets</li></ul><button class="btn ghost" data-plan="month">Join waiting list — free</button></div>
+        <div class="card"><h3>12 weeks</h3><div class="price">£9</div><ul class="perks"><li>Ends a Sunday 6pm</li><li>Skips 11 resets</li></ul><button class="btn ghost" data-plan="term">Join waiting list — free</button></div>
+      </div>
+      <p class="muted" style="font-size:13px">Joining is free — you pay your coach in real life (cash or bank transfer, never through this site), and once he marks your order Complete, your pass unlocks.</p>
+      <div class="panel" style="max-width:760px;margin-top:16px">
+        <h3 style="margin-bottom:4px">Ask for a waiting list spot</h3>
+        <p class="muted" style="font-size:13px">Pick a size — your coach approves you, then you pay in person.</p>
+        <div class="row" style="margin-top:8px">
+          <select id="wlPlan" style="flex:1;min-width:220px">
+            <option value="week">1 week — £1</option>
+            <option value="twoweek">2 weeks — £2</option>
+            <option value="month">4 weeks — £3</option>
+            <option value="term">12 weeks — £9</option>
+          </select>
+          <button class="btn" id="wlJoin">Request spot</button>
+        </div>
+        <div class="err" id="wlErr"></div>
+        <div id="wlStatus" style="margin-top:10px"></div>
+      </div>
     </div>
 
     <!-- CHAT -->
@@ -93,6 +100,13 @@
 let me = null;
 const $ = (id) => document.getElementById(id);
 
+const PLAN_LABEL = { week:'1 week', twoweek:'2 week', month:'4 week', term:'12 week' };
+function fmtCd(ms) {
+  if (ms <= 0) return 'expired';
+  const d = Math.floor(ms/86400000), h = Math.floor(ms%86400000/3600000), m = Math.floor(ms%3600000/60000), sec = Math.floor(ms%60000/1000);
+  return (d ? d+'d ' : '') + String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(sec).padStart(2,'0');
+}
+
 async function refresh() {
   const r = await fetch('/api/me');
   if (!r.ok) { $('notauth').style.display = 'block'; return; }
@@ -107,13 +121,13 @@ async function refresh() {
   $('chatDot').style.display = me.unread > 0 ? 'inline' : 'none';
   const pill = $('accessPill');
   if (me.access) {
-    const d = Math.ceil((me.access.expiresAt - Date.now()) / 86400000);
-    pill.className = 'pill on'; pill.textContent = `${me.access.plan === 'week' ? '1 week' : '4 week'} pass · ${d}d left`;
+    pill.className = 'pill on'; pill.textContent = `${PLAN_LABEL[me.access.plan] || me.access.plan} pass · loading…`;
   } else if (me.bannedUntil) {
     pill.className = 'pill off'; pill.textContent = `⛔ Blocked from passes until ${new Date(me.bannedUntil).toLocaleDateString('en-GB')}`;
   } else if (me.pendingOrder) {
     pill.className = 'pill wait'; pill.textContent = 'On waiting list — order awaiting payment';
   } else { pill.className = 'pill off'; pill.textContent = 'No active pass'; }
+  renderWaitlist();
 }
 
 // tabs
@@ -205,6 +219,27 @@ document.querySelectorAll('#tab-pass [data-plan]').forEach(b => b.onclick = asyn
   if (r.ok) { $("reqOk").textContent = "✅ You're on the waiting list! Pay your coach, then they click Complete on your order."; refresh(); }
   else $('reqErr').textContent = j.error || 'Error';
 });
+
+// approval waiting list: pick a size, coach approves
+$('wlJoin').onclick = async () => {
+  $('wlErr').textContent = '';
+  const r = await fetch('/api/waitlist', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ plan: $('wlPlan').value }) });
+  const j = await r.json();
+  if (r.ok) { $('reqOk').textContent = "✅ Spot requested — your coach will approve you."; refresh(); }
+  else $('wlErr').textContent = j.error || 'Error';
+};
+function renderWaitlist() {
+  const el = $('wlStatus');
+  if (!me || !me.waitlist) { el.innerHTML = ''; return; }
+  const w = me.waitlist, p = PLAN_LABEL[w.plan] || w.plan;
+  el.innerHTML = w.status === 'pending'
+    ? `<span class="pill wait">⏳ ${p} spot requested — waiting for coach approval</span>`
+    : `<span class="pill on">✅ Approved: ${p} pass — pay your coach in person. Time left to claim: <strong data-cd="${me.weekResetAt}"></strong></span>`;
+}
+setInterval(() => {
+  document.querySelectorAll('[data-cd]').forEach(el => { el.textContent = fmtCd(+el.dataset.cd - Date.now()); });
+  if (me && me.access) $('accessPill').textContent = `${PLAN_LABEL[me.access.plan] || me.access.plan} pass · ${fmtCd(me.access.expiresAt - Date.now())} left`;
+}, 1000);
 
 // chat
 async function loadChat() {
