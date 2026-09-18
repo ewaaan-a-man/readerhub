@@ -262,6 +262,15 @@ async function handleApi(req, res, pathname) {
   const url = new URL(req.url, 'http://x');
   const route = `${req.method} ${pathname}`;
 
+  if (route === 'GET /api/health') {
+    return sendJson(res, 200, {
+      ok: true,
+      storage: TURSO_URL ? 'turso' : 'file',
+      cloudLoaded,
+      uptimeSec: Math.round(process.uptime()),
+    });
+  }
+
   if (route === 'POST /api/signup') {
     const body = await readBody(req);
     if (!body) return sendJson(res, 400, { error: 'Bad request' });
