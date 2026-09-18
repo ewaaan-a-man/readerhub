@@ -267,6 +267,7 @@ async function handleApi(req, res, pathname) {
       ok: true,
       storage: TURSO_URL ? 'turso' : 'file',
       cloudLoaded,
+      users: db.users.length,
       uptimeSec: Math.round(process.uptime()),
     });
   }
